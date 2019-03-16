@@ -202,6 +202,7 @@ typedef struct clusterNode clusterNode;
 // 另外，虽然这个结构主要用于记录集群的属性，但是为了节约资源，
 // 有些与节点有关的属性，比如 slots_to_keys 、 failover_auth_count 
 // 也被放到了这个结构里面。
+// 塞到server.cluster里面
 typedef struct clusterState {
 
     // 指向当前节点的指针
@@ -403,7 +404,10 @@ union clusterMsgData {
     /* PING, MEET and PONG */
     struct {
         /* Array of N clusterMsgDataGossip structures */
-        // 每条消息都包含两个 clusterMsgDataGossip 结构
+        // 每条MEET,PING,PONG消息都包含两个clusterMsgDataGossip结构
+
+        // 每次发送MEET,PING,PONG消息时，发送者都从自己的已知节点列表中随机选出两个节点（可以是主节点或者从节点）
+        // 并将这两个被选中节点的信息分别保存到两个clusterMsgDataGossip结构里面。
         clusterMsgDataGossip gossip[1];
     } ping;
 
@@ -437,7 +441,7 @@ typedef struct {
 
     // 消息正文包含的节点信息数量
     // 只在发送 MEET 、 PING 和 PONG 这三种 Gossip 协议消息时使用
-    uint16_t count;     /* Only used for some kind of messages. */
+    uint16_t count;     /* Only used for some kind of messages. */  // 有两个吧？
 
     // 消息发送者的配置纪元
     uint64_t currentEpoch;  /* The epoch accordingly to the sending node. */

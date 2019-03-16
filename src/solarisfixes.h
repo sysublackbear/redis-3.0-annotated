@@ -32,9 +32,10 @@
 #include <math.h>
 #undef isnan
 #define isnan(x) \
-     __extension__({ __typeof (x) __x_a = (x); \
-     __builtin_expect(__x_a != __x_a, 0); })
-
+     __extension__({ __typeof (x) __x_a = (x); \  // __extension__关键字会告诉gcc不要提出警告
+     __builtin_expect(__x_a != __x_a, 0); })  // 告诉编译器,__x_a != __x_a为假的概率很低
+// 这样做的目的:通过这种方式，编译器在编译过程中，会将可能性更大的代码紧跟着起面的代码，从而减少指令跳转带来的性能上的下降。
+     
 #undef isfinite
 #define isfinite(x) \
      __extension__ ({ __typeof (x) __x_f = (x); \

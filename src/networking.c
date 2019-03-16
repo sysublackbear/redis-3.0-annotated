@@ -888,6 +888,8 @@ void freeClient(redisClient *c) {
     listNode *ln;
 
     /* If this is marked as current client unset it */
+    // 如果c是服务器的当前客户端，仅用于崩溃报告
+    // 清空当前客户端
     if (server.current_client == c) server.current_client = NULL;
 
     /* If it is our master that's beging disconnected we should make sure
@@ -902,6 +904,7 @@ void freeClient(redisClient *c) {
                           REDIS_BLOCKED|
                           REDIS_UNBLOCKED)))
         {
+            // 这个函数由 freeClient() 函数调用，它将当前的 master 记录到 master cache 里面，然后返回。
             replicationCacheMaster(c);
             return;
         }
@@ -941,6 +944,7 @@ void freeClient(redisClient *c) {
      * accumulated arguments. */
     // 关闭套接字，并从事件处理器中删除该套接字的事件
     if (c->fd != -1) {
+        // 包括可读事件和可写事件
         aeDeleteFileEvent(server.el,c->fd,AE_READABLE);
         aeDeleteFileEvent(server.el,c->fd,AE_WRITABLE);
         close(c->fd);
@@ -985,6 +989,7 @@ void freeClient(redisClient *c) {
          * backlog. */
         if (c->flags & REDIS_SLAVE && listLength(server.slaves) == 0)
             server.repl_no_slaves_since = server.unixtime;
+        // 这个函数很复杂
         refreshGoodSlavesCount();
     }
 
@@ -1613,6 +1618,14 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
         return;
     }
 
+    // !!!注意：这里会有一种异常。
+    // 主服务器一直同步命令给从服务器，但是从服务器没有执行这些命令，导致主从之间的偏移值偏大。
+    // 这种情况下是怎么被发现的，通过这个函数readQueryFromClient来发现的。
+    // 如果命令没有执行，相当于querybuf的长度会一直增大，因为读取的逻辑没有正确执行。
+    // 当超出server.client_max_querybuf_len，从服务器会自动断开主服务器这个client。
+    // 主从处于断线的状态，后续通过主机的想办法恢复重连，然后决定是进行部分同步还是全同步。
+
+
     // 查询缓冲区长度超出服务器最大缓冲区长度
     // 清空缓冲区并释放客户端
     if (sdslen(c->querybuf) > server.client_max_querybuf_len) {
@@ -2143,6 +2156,7 @@ void pauseClients(mstime_t end) {
  * function checks if the pause time was reached and clear it. */
  // 判断服务器目前被暂停客户端的数量，没有任何客户端被暂停时，返回 0 。
 int clientsArePaused(void) {
+    // 存在被暂停的客户端，并且暂停的时间已经到期了
     if (server.clients_paused && server.clients_pause_end_time < server.mstime) {
         listNode *ln;
         listIter li;

@@ -266,6 +266,7 @@ void sortCommand(redisClient *c) {
 
     /* Lookup the key to sort. It must be of the right types */
 	// 获取要排序的键，并检查他是否可以被排序的类型
+    // 对key-value进行排序
     sortval = lookupKeyRead(c->db,c->argv[1]);
     if (sortval && sortval->type != REDIS_SET &&
                    sortval->type != REDIS_LIST &&

@@ -1096,6 +1096,8 @@ struct redisServer {
     // 负责执行 BGSAVE 的子进程的 ID
     // 没在执行 BGSAVE 时，设为 -1
     pid_t rdb_child_pid;            /* PID of RDB saving child */
+
+    // 记录了保存条件的数组
     struct saveparam *saveparams;   /* Save points array for RDB */
     int saveparamslen;              /* Number of saving points */
     char *rdb_filename;             /* Name of RDB file */
@@ -1503,6 +1505,7 @@ typedef struct {
  *----------------------------------------------------------------------------*/
 
 extern struct redisServer server;
+// 通过复用来减少内存碎片，以及减少操作耗时的共享对象
 extern struct sharedObjectsStruct shared;
 extern dictType setDictType;
 extern dictType zsetDictType;

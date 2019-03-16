@@ -46,7 +46,7 @@
  * 写入成功返回 len ，失败返回 -1 。
  */
 static int rdbWriteRaw(rio *rdb, void *p, size_t len) {
-    if (rdb && rioWrite(rdb,p,len) == 0)
+    if (rdb && rioWrite(rdb,p,len) == 0)   // 等于0代表写不进去
         return -1;
     return len;
 }
@@ -81,7 +81,7 @@ int rdbLoadType(rio *rdb) {
  */
 time_t rdbLoadTime(rio *rdb) {
     int32_t t32;
-    if (rioRead(rdb,&t32,4) == 0) return -1;
+    if (rioRead(rdb,&t32,4) == 0) return -1;  // 过期时间占4个字节
     return (time_t)t32;
 }
 
@@ -147,7 +147,7 @@ int rdbSaveLen(rio *rdb, uint32_t len) {
  *
  * 如果 length 值不是整数，而是一个被编码后值，那么 isencoded 将被设为 1 。
  *
- * 查看 rdb./hREDIS_RDB_ENC_* 定义以获得更多信息。
+ * 查看 rdb.h/REDIS_RDB_ENC_* 定义以获得更多信息。
  */
 uint32_t rdbLoadLen(rio *rdb, int *isencoded) {
     unsigned char buf[2];
@@ -317,9 +317,12 @@ int rdbSaveLzfStringObject(rio *rdb, unsigned char *s, size_t len) {
 
     /* We require at least four bytes compression for this to be worth it */
     // 压缩字符串
+    // 压缩字符串至少需要4个字节
     if (len <= 4) return 0;
     outlen = len-4;
     if ((out = zmalloc(outlen+1)) == NULL) return 0;
+
+    // 才用lzf算法进行压缩
     comprlen = lzf_compress(s, len, out, outlen);
     if (comprlen == 0) {
         zfree(out);
@@ -372,6 +375,7 @@ robj *rdbLoadLzfStringObject(rio *rdb) {
     // 压缩缓存空间
     if ((c = zmalloc(clen)) == NULL) goto err;
     // 字符串空间
+    // 先创建这样的空间
     if ((val = sdsnewlen(NULL,len)) == NULL) goto err;
 
     // 读入压缩后的缓存
@@ -524,6 +528,7 @@ robj *rdbGenericLoadStringObject(rio *rdb, int encode) {
     sds val;
 
     // 长度
+    // 看这个长度是否有被编码
     len = rdbLoadLen(rdb,&isencoded);
 
     // 这是一个特殊编码字符串
@@ -660,7 +665,9 @@ int rdbSaveObjectType(rio *rdb, robj *o) {
 
     switch (o->type) {
 
+    // 仅仅把对象的类型写入到rdb中
     case REDIS_STRING:
+        // 将长度为 1 字节的字符 type 写入到 rdb 文件中
         return rdbSaveType(rdb,REDIS_RDB_TYPE_STRING);
 
     case REDIS_LIST:
@@ -732,9 +739,13 @@ int rdbSaveObject(rio *rdb, robj *o) {
     } else if (o->type == REDIS_LIST) {
         /* Save a list value */
         if (o->encoding == REDIS_ENCODING_ZIPLIST) {
+            // ziplist的实际占用的字节大小
             size_t l = ziplistBlobLen((unsigned char*)o->ptr);
 
             // 以字符串对象的形式保存整个 ZIPLIST 列表
+            // 直接将整个ziplist塞进去
+            // ziplist代表的列表的每个选项
+            // zlbytes|zltail|zllen|item1|item2|...|itemN|zlend
             if ((n = rdbSaveRawString(rdb,o->ptr,l)) == -1) return -1;
             nwritten += n;
         } else if (o->encoding == REDIS_ENCODING_LINKEDLIST) {
@@ -746,6 +757,8 @@ int rdbSaveObject(rio *rdb, robj *o) {
             nwritten += n;
 
             // 遍历所有列表项
+            // redis是个双端链表
+            // 无论是正向遍历还是逆向遍历，需要通过调用listRewind/listRewindTail决定方向
             listRewind(list,&li);
             while((ln = listNext(&li))) {
                 robj *eleobj = listNodeValue(ln);
@@ -797,6 +810,7 @@ int rdbSaveObject(rio *rdb, robj *o) {
             nwritten += n;
         } else if (o->encoding == REDIS_ENCODING_SKIPLIST) {
             zset *zs = o->ptr;
+            // 这里使用了不安全迭代器（因为写RDB的过程不可能出现竞争）
             dictIterator *di = dictGetIterator(zs->dict);
             dictEntry *de;
 
@@ -804,6 +818,8 @@ int rdbSaveObject(rio *rdb, robj *o) {
             nwritten += n;
 
             // 遍历有序集
+            // 先存值，再存score
+            // value|score
             while((de = dictNext(di)) != NULL) {
                 robj *eleobj = dictGetKey(de);
                 double *score = dictGetVal(de);
@@ -841,6 +857,7 @@ int rdbSaveObject(rio *rdb, robj *o) {
             nwritten += n;
 
             // 迭代字典
+            // key|value
             while((de = dictNext(di)) != NULL) {
                 robj *key = dictGetKey(de);
                 robj *val = dictGetVal(de);
@@ -888,6 +905,8 @@ off_t rdbSavedObjectLen(robj *o) {
  *
  * 成功保存返回 1 ，当键已经过期时，返回 0 。
  */
+// 这里的value是指数据库的value吧
+// EXPIRETIME_MS|ms|type|key|value
 int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val,
                         long long expiretime, long long now)
 {
@@ -900,6 +919,7 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val,
          *
          * 不写入已经过期的键
          */
+        // 存在过期时间
         if (expiretime < now) return 0;
 
         if (rdbSaveType(rdb,REDIS_RDB_OPCODE_EXPIRETIME_MS) == -1) return -1;
@@ -923,6 +943,8 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val,
  *
  * 保存成功返回 REDIS_OK ，出错/失败返回 REDIS_ERR 。
  */
+// REDIS|db_version|databases|EOF|check_sum
+// SELECTDB|db_numbers|
 int rdbSave(char *filename) {
     dictIterator *di = NULL;
     dictEntry *de;
@@ -948,10 +970,10 @@ int rdbSave(char *filename) {
 
     // 设置校验和函数
     if (server.rdb_checksum)
-        rdb.update_cksum = rioGenericUpdateChecksum;
+        rdb.update_cksum = rioGenericUpdateChecksum;   // 采用crc64算法进行校验和检查
 
     // 写入 RDB 版本号
-    snprintf(magic,sizeof(magic),"REDIS%04d",REDIS_RDB_VERSION);
+    snprintf(magic,sizeof(magic),"REDIS%04d",REDIS_RDB_VERSION);   // #define REDIS_RDB_VERSION 6
     if (rdbWriteRaw(&rdb,magic,9) == -1) goto werr;
 
     // 遍历所有数据库
@@ -978,7 +1000,7 @@ int rdbSave(char *filename) {
          * 写入 DB 选择器
          */
         if (rdbSaveType(&rdb,REDIS_RDB_OPCODE_SELECTDB) == -1) goto werr;
-        if (rdbSaveLen(&rdb,j) == -1) goto werr;
+        if (rdbSaveLen(&rdb,j) == -1) goto werr;  // dbid
 
         /* Iterate this DB writing every entry 
          *
@@ -996,6 +1018,7 @@ int rdbSave(char *filename) {
             expire = getExpire(db,&key);
 
             // 保存键值对数据
+            // 写上EXPIRETIME_MS|ms|key|value
             if (rdbSaveKeyValuePair(&rdb,&key,o,expire,now) == -1) goto werr;
         }
         dictReleaseIterator(di);
@@ -1021,7 +1044,7 @@ int rdbSave(char *filename) {
     rioWrite(&rdb,&cksum,8);
 
     /* Make sure data will not remain on the OS's output buffers */
-    // 冲洗缓存，确保数据已写入磁盘
+    // 冲洗缓存，确保数据已写入磁盘(防止write操作只是写到内存缓冲区里面，如果计算机发生停机，会存在丢数据风险。)
     if (fflush(fp) == EOF) goto werr;
     if (fsync(fileno(fp)) == -1) goto werr;
     if (fclose(fp) == EOF) goto werr;
@@ -1069,6 +1092,7 @@ int rdbSaveBackground(char *filename) {
     long long start;
 
     // 如果 BGSAVE 已经在执行，那么出错
+    // 防止竞争
     if (server.rdb_child_pid != -1) return REDIS_ERR;
 
     // 记录 BGSAVE 执行前的数据库被修改次数
@@ -1082,10 +1106,12 @@ int rdbSaveBackground(char *filename) {
 
     if ((childpid = fork()) == 0) {
         int retval;
+        // 子进程
 
         /* Child */
 
         // 关闭网络连接 fd
+        // COW关闭监听的所有fd
         closeListeningSockets(0);
 
         // 设置进程的标题，方便识别
@@ -1113,6 +1139,7 @@ int rdbSaveBackground(char *filename) {
         /* Parent */
 
         // 计算 fork() 执行的时间
+        // fork用了多少时间
         server.stat_fork_time = ustime()-start;
 
         // 如果 fork() 出错，那么报告错误
@@ -1133,6 +1160,8 @@ int rdbSaveBackground(char *filename) {
         server.rdb_child_pid = childpid;
 
         // 关闭自动 rehash
+        // 把不必要的更新关掉
+        // 减少cow，理想情况下不需要消耗额外的内存
         updateDictResizePolicy();
 
         return REDIS_OK;
@@ -1156,7 +1185,7 @@ void rdbRemoveTempFile(pid_t childpid) {
 /* Load a Redis object of the specified type from the specified file.
  *
  * 从 rdb 文件中载入指定类型的对象。
- *
+ * 从 rdb 文件中读取内容构建对象
  * On success a newly allocated object is returned, otherwise NULL. 
  *
  * 读入成功返回一个新对象，否则返回 NULL 。
@@ -1185,6 +1214,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
          *
          * 根据节点数，创建对象的编码
          */
+
+        // 节点数少：ziplist
+        // 节点数多：linkedlist
         if (len > server.list_max_ziplist_entries) {
             o = createListObject();
         } else {
@@ -1380,6 +1412,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
             /* Convert to hash table if size threshold is exceeded 
              *
              * 如果元素过多，那么将编码转换为 HT 
+             * ziplist转dict（元素个数太多引发的转换）
              */
             if (sdslen(field->ptr) > server.hash_max_ziplist_value ||
                 sdslen(value->ptr) > server.hash_max_ziplist_value)
@@ -1604,6 +1637,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
          * our cached time since it is used to create and update the last
          * interaction time with clients and for other important things. */
         updateCachedTime();
+        // 发送一个换行符给主服务器
         if (server.masterhost && server.repl_state == REDIS_REPL_TRANSFER)
             replicationSendNewlineToMaster();
         loadingProgress(r->processed_bytes);
@@ -1628,7 +1662,7 @@ int rdbLoad(char *filename) {
 
     // 初始化写入流
     rioInitWithFile(&rdb,fp);
-    rdb.update_cksum = rdbLoadProgressCallback;
+    rdb.update_cksum = rdbLoadProgressCallback;  // crc64算法
     rdb.max_processing_chunk = server.loading_process_events_interval_bytes;
     if (rioRead(&rdb,buf,9) == 0) goto eoferr;
     buf[9] = '\0';
@@ -1640,6 +1674,7 @@ int rdbLoad(char *filename) {
         errno = EINVAL;
         return REDIS_ERR;
     }
+    // 最大版本号不能大于6
     rdbver = atoi(buf+5);
     if (rdbver < 1 || rdbver > REDIS_RDB_VERSION) {
         fclose(fp);
@@ -1718,12 +1753,14 @@ int rdbLoad(char *filename) {
             }
 
             // 在程序内容切换数据库
-            db = server.db+dbid;
+            // 正常情况下同一个db的数据都会写到rdb文件的同一个地方
+            db = server.db+dbid;   // 写到哪个数据里面
 
             // 跳过
             continue;
         }
 
+        // 一行一条数据
         /* Read key 
          *
          * 读入键
@@ -1808,10 +1845,11 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
 void backgroundSaveDoneHandler(int exitcode, int bysignal) {
 
     // BGSAVE 成功
+    // 根据信号和返回码来进行综合判断
     if (!bysignal && exitcode == 0) {
         redisLog(REDIS_NOTICE,
             "Background saving terminated with success");
-        server.dirty = server.dirty - server.dirty_before_bgsave;
+        server.dirty = server.dirty - server.dirty_before_bgsave;   // 更新dirty参数
         server.lastsave = time(NULL);
         server.lastbgsave_status = REDIS_OK;
 
@@ -1840,6 +1878,7 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     /* Possibly there are slaves waiting for a BGSAVE in order to be served
      * (the first stage of SYNC is a bulk transfer of dump.rdb) */
     // 处理正在等待 BGSAVE 完成的那些 slave
+    // 每次主服务器完成一次bgsave，触发一次对从服务器rdb文件的同步
     updateSlavesWaitingBgsave(exitcode == 0 ? REDIS_OK : REDIS_ERR);
 }
 
@@ -1852,7 +1891,8 @@ void saveCommand(redisClient *c) {
         return;
     }
 
-    // 执行 
+    // 执行
+    // 执行写临时文件操作，并且做原子性替换 
     if (rdbSave(server.rdb_filename) == REDIS_OK) {
         addReply(c,shared.ok);
     } else {

@@ -1372,6 +1372,8 @@ unsigned long dictScan(dict *d,
 
             /* Continue while bits covered by mask difference is non-zero */
         } while (v & (m0 ^ m1));
+        // 存在两个桶的时候(正在rehash),仍然选择全局遍历的模式，每次遍历
+        // 先找特定的字典
     }
 
     /* Set unmasked bits so incrementing the reversed cursor

@@ -39,6 +39,7 @@
  * Redis 512 MB limit for the string value. */
 // 辅佐函数，被 GETBIT 、 SETBIT 所使用
 // 用于检查字符串的大小有否超过 512 MB
+// 如果没有超过512MB，则返回当前字符串的大小
 static int getBitOffsetFromArgument(redisClient *c, robj *o, size_t *offset) {
     long long loffset;
     char *err = "bit offset is not an integer or out of range";
@@ -62,6 +63,9 @@ static int getBitOffsetFromArgument(redisClient *c, robj *o, size_t *offset) {
  * work with a input string length up to 512 MB. */
 // 计算长度为 count 的二进制数组指针 s 被设置为 1 的位数量
 // 这个函数只能在最大为 512 MB 的字符串上使用
+
+// 1.大于16字节的，使用汉明重量计算法,循环累加；
+// 2.直至低于16字节的时候，使用查表法，计算1的个数。
 size_t redisPopcount(void *s, long count) {
     size_t bits = 0;
     unsigned char *p = s;
@@ -429,6 +433,8 @@ void bitopCommand(redisClient *c) {
             /* Different branches per different operations for speed (sorry). */
             // 当要处理的位大于等于 32 位时
             // 每次载入 4*8 = 32 个位，然后对这些位进行计算，利用缓存，进行加速
+
+            // 批量处理，一次处理32个字节
             if (op == BITOP_AND) {
                 while(minlen >= sizeof(unsigned long)*4) {
                     for (i = 1; i < numkeys; i++) {
@@ -586,6 +592,7 @@ void bitcountCommand(redisClient *c) {
 }
 
 /* BITPOS key bit [start [end]] */
+// 返回字符串key在[start, end]中第一个被设置成0或1的位
 void bitposCommand(redisClient *c) {
     robj *o;
     long bit, start, end, strlen;

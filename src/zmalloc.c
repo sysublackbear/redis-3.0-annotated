@@ -220,7 +220,8 @@ size_t zmalloc_used_memory(void) {
 
     if (zmalloc_thread_safe) {
 #ifdef HAVE_ATOMIC
-        um = __sync_add_and_fetch(&used_memory, 0);
+        // 将used_memory+0,赋值到um，保证在多线程环境下不会抢占写，加法和赋值均属于原子操作
+        um = __sync_add_and_fetch(&used_memory, 0);   // 无锁原子操作，编译器支持
 #else
         pthread_mutex_lock(&used_memory_mutex);
         um = used_memory;

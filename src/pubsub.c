@@ -67,6 +67,11 @@ int pubsubSubscribeChannel(redisClient *c, robj *channel) {
 
     /* Add the channel to the client -> channels hash table */
     // 将 channels 填接到 c->pubsub_channels 的集合中（值为 NULL 的字典视为集合）
+
+    // 先添加redisClient的频道信息
+    // 这个字典记录了客户端所有订阅的频道
+    // 键为频道名字，值为 NULL
+    // 也即是，一个频道的集合
     if (dictAdd(c->pubsub_channels,channel,NULL) == DICT_OK) {
         retval = 1;
         incrRefCount(channel);
@@ -81,6 +86,11 @@ int pubsubSubscribeChannel(redisClient *c, robj *channel) {
         /* Add the client to the channel -> list of clients hash table */
         // 从 pubsub_channels 字典中取出保存着所有订阅了 channel 的客户端的链表
         // 如果 channel 不存在于字典，那么添加进去
+
+        /* Pubsub */
+        // 字典，键为频道，值为链表
+        // 链表中保存了所有订阅某个频道的客户端
+        // 新客户端总是被添加到链表的表尾
         de = dictFind(server.pubsub_channels,channel);
         if (de == NULL) {
             clients = listCreate();
@@ -146,6 +156,8 @@ int pubsubUnsubscribeChannel(redisClient *c, robj *channel, int notify) {
     //  'channel-x': NULL,
     //  'channel-z': NULL,
     // }
+
+    // 先删除客户端订阅的频道信息
     if (dictDelete(c->pubsub_channels,channel) == DICT_OK) {
 
         // channel 移除成功，表示客户端订阅了这个频道，执行以下代码
@@ -184,6 +196,7 @@ int pubsubUnsubscribeChannel(redisClient *c, robj *channel, int notify) {
             /* Free the list and associated hash entry at all if this was
              * the latest client, so that it will be possible to abuse
              * Redis PUBSUB creating millions of channels. */
+            // 如果server端已经没有记录到其他client端订阅这个频道，把频道信息也删除掉
             dictDelete(server.pubsub_channels,channel);
         }
     }
@@ -218,7 +231,7 @@ int pubsubSubscribePattern(redisClient *c, robj *pattern) {
 
     // 在链表中查找模式，看客户端是否已经订阅了这个模式
     // 这里为什么不像 channel 那样，用字典来进行检测呢？
-    // 虽然 pattern 的数量一般来说并不多
+    // 虽然 pattern 的数量一般来说并不多（因为原本的数据类型就是list）
     if (listSearchKey(c->pubsub_patterns,pattern) == NULL) {
         
         // 如果没有的话，执行以下代码
@@ -228,6 +241,7 @@ int pubsubSubscribePattern(redisClient *c, robj *pattern) {
         pubsubPattern *pat;
 
         // 将 pattern 添加到 c->pubsub_patterns 链表中
+        // 先添加client端，再添加server端
         listAddNodeTail(c->pubsub_patterns,pattern);
 
         incrRefCount(pattern);
@@ -324,9 +338,10 @@ int pubsubUnsubscribeAllChannels(redisClient *c, int notify) {
     int count = 0;
 
     // 退订
+    // 遍历c订阅的所有频道
     while((de = dictNext(di)) != NULL) {
         robj *channel = dictGetKey(de);
-
+        // 逐个频道退订
         count += pubsubUnsubscribeChannel(c,channel,notify);
     }
 
@@ -365,6 +380,7 @@ int pubsubUnsubscribeAllPatterns(redisClient *c, int notify) {
         robj *pattern = ln->value;
 
         // 退订，并计算退订数
+        // 逐个模式退订
         count += pubsubUnsubscribePattern(c,pattern,notify);
     }
 
@@ -388,6 +404,8 @@ int pubsubUnsubscribeAllPatterns(redisClient *c, int notify) {
  * 将 message 发送到所有订阅频道 channel 的客户端，
  * 以及所有订阅了和 channel 频道匹配的模式的客户端。
  */
+
+// 发布到订阅了对应频道
 int pubsubPublishMessage(robj *channel, robj *message) {
     int receivers = 0;
     dictEntry *de;
@@ -477,7 +495,7 @@ void subscribeCommand(redisClient *c) {
     int j;
 
     for (j = 1; j < c->argc; j++)
-        pubsubSubscribeChannel(c,c->argv[j]);
+        pubsubSubscribeChannel(c,c->argv[j]);  // 逐个频道（参数）进行订阅
 }
 
 void unsubscribeCommand(redisClient *c) {
@@ -487,10 +505,11 @@ void unsubscribeCommand(redisClient *c) {
         int j;
 
         for (j = 1; j < c->argc; j++)
-            pubsubUnsubscribeChannel(c,c->argv[j],1);
+            pubsubUnsubscribeChannel(c,c->argv[j],1);  // 逐个频道退订
     }
 }
 
+// patternSubscribe
 void psubscribeCommand(redisClient *c) {
     int j;
 
@@ -512,9 +531,15 @@ void punsubscribeCommand(redisClient *c) {
 void publishCommand(redisClient *c) {
 
     int receivers = pubsubPublishMessage(c->argv[1],c->argv[2]);
-    if (server.cluster_enabled)
+    if (server.cluster_enabled)  // 集群模式
+        // 向整个集群的 channel 频道中广播消息 messages
+        // void clusterPropagatePublish(robj *channel, robj *message) {
+            // clusterSendPublish(NULL, channel, message);
+        // }
+        // 那么将消息广播给整个集群，将消息广播到整个集群
         clusterPropagatePublish(c->argv[1],c->argv[2]);
     else
+        // 非集群模式，传播给备机
         forceCommandPropagation(c,REDIS_PROPAGATE_REPL);
     addReplyLongLong(c,receivers);
 }
@@ -522,11 +547,14 @@ void publishCommand(redisClient *c) {
 /* PUBSUB command for Pub/Sub introspection. */
 void pubsubCommand(redisClient *c) {
 
-    // PUBSUB CHANNELS [pattern] 子命令
+    // PUBSUB CHANNELS [pattern] 子命令用于返回服务器当前被订阅的频道，其中pattern参数是可选的：
+    // ·如果不给定pattern参数，那么命名返回服务器当前被订阅的所有频道；
+    // ·如果给定pattern参数，那么命令返回服务器当前被订阅的频道中那些与pattern模式相匹配的频道。
     if (!strcasecmp(c->argv[1]->ptr,"channels") &&
         (c->argc == 2 || c->argc ==3))
     {
         /* PUBSUB CHANNELS [<pattern>] */
+        // 计算客户端订阅的频道个数
         // 检查命令请求是否给定了 pattern 参数
         // 如果没有给定的话，就设为 NULL
         sds pat = (c->argc == 2) ? NULL : c->argv[2]->ptr;
@@ -566,6 +594,7 @@ void pubsubCommand(redisClient *c) {
         setDeferredMultiBulkLength(c,replylen,mblen);
 
     // PUBSUB NUMSUB [channel-1 channel-2 ... channel-N] 子命令
+    // 接受任意多个频道作为输入参数，并返回这些频道的订阅者数量。
     } else if (!strcasecmp(c->argv[1]->ptr,"numsub") && c->argc >= 2) {
         /* PUBSUB NUMSUB [Channel_1 ... Channel_N] */
         int j;
@@ -587,7 +616,7 @@ void pubsubCommand(redisClient *c) {
             addReplyBulkLongLong(c,l ? listLength(l) : 0);
         }
 
-    // PUBSUB NUMPAT 子命令
+    // PUBSUB NUMPAT 子命令用于返回服务器当前被订阅模式的数量
     } else if (!strcasecmp(c->argv[1]->ptr,"numpat") && c->argc == 2) {
         /* PUBSUB NUMPAT */
 

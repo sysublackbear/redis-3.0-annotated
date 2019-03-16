@@ -84,6 +84,7 @@ slowlogEntry *slowlogCreateEntry(robj **argv, int argc, long long duration) {
         } else {
             /* Trim too long strings as well... */
             // 如果参数太长，那么进行截断
+            // 单个参数的长度不能超过128
             if (argv[j]->type == REDIS_STRING &&
                 sdsEncodedObject(argv[j]) &&
                 sdslen(argv[j]->ptr) > SLOWLOG_ENTRY_MAX_STRING)
@@ -130,6 +131,7 @@ void slowlogFreeEntry(void *septr) {
     int j;
 
     // 释放参数
+    // 逐个命令参数都需要释放
     for (j = 0; j < se->argc; j++)
         decrRefCount(se->argv[j]);
 
@@ -145,6 +147,9 @@ void slowlogFreeEntry(void *septr) {
  *
  * 这个函数只应该在服务器启动时执行一次。
  */
+// 由redis.c中的initServer()所调用
+// 初始化慢查询功能
+// slowlogInit();
 void slowlogInit(void) {
 
     // 保存日志的链表，FIFO 顺序
@@ -167,10 +172,16 @@ void slowlogInit(void) {
  *
  * 根据服务器设置的最大日志长度，可能会对日志进行截断（trim）
  */
+// 由redis.c中call()中调用
+// 如果有需要，将命令放到 SLOWLOG 里面
+// if (flags & REDIS_CALL_SLOWLOG && c->cmd->proc != execCommand)
+    //slowlogPushEntryIfNeeded(c->argv,c->argc,duration);
 void slowlogPushEntryIfNeeded(robj **argv, int argc, long long duration) {
 
     // 慢查询功能未开启，直接返回
     if (server.slowlog_log_slower_than < 0) return; /* Slowlog disabled */
+    // #define REDIS_SLOWLOG_LOG_SLOWER_THAN 10000
+    // 默认超过10000微秒（10毫秒）视为慢查询
 
     // 如果执行时间超过服务器设置的上限，那么将命令添加到慢查询日志
     if (duration >= server.slowlog_log_slower_than)
@@ -180,7 +191,7 @@ void slowlogPushEntryIfNeeded(robj **argv, int argc, long long duration) {
     /* Remove old entries if needed. */
     // 如果日志数量过多，那么进行删除
     while (listLength(server.slowlog) > server.slowlog_max_len)
-        listDelNode(server.slowlog,listLast(server.slowlog));
+        listDelNode(server.slowlog,listLast(server.slowlog));  // FIFO，往头插入，从尾部删除
 }
 
 /* Remove all the entries from the current slow log. 

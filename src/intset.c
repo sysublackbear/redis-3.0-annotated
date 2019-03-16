@@ -272,7 +272,7 @@ static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
     is->encoding = intrev32ifbe(newenc);
     // 根据新编码对集合（的底层数组）进行空间调整
     // T = O(N)
-    is = intsetResize(is,intrev32ifbe(is->length)+1);
+    is = intsetResize(is,intrev32ifbe(is->length)+1);  // 长度增加1
 
     /* Upgrade back-to-front so we don't overwrite values.
      * Note that the "prepend" variable is used to make sure we have an empty
@@ -361,6 +361,8 @@ static void intsetMoveTail(intset *is, uint32_t from, uint32_t to) {
     // src = (Enc_t*)is->contents+from 记录移动开始的位置
     // dst = (Enc_t*)is_.contents+to 记录移动结束的位置
     // bytes *= sizeof(Enc_t) 计算一共要移动多少字节
+
+    // 直接算好起点和终点，大块内存移动
     if (encoding == INTSET_ENC_INT64) {
         src = (int64_t*)is->contents+from;
         dst = (int64_t*)is->contents+to;
@@ -393,6 +395,7 @@ static void intsetMoveTail(intset *is, uint32_t from, uint32_t to) {
 intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
 
     // 计算编码 value 所需的长度
+    // 根据value的取值范围得出编码值
     uint8_t valenc = _intsetValueEncoding(value);
     uint32_t pos;
 

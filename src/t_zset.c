@@ -113,7 +113,7 @@ zskiplist *zslCreate(void) {
 
     // 初始化表头节点
     // T = O(1)
-    zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
+    zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);  // 默认设置最大层数为32
     for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
         zsl->header->level[j].forward = NULL;
         zsl->header->level[j].span = 0;
@@ -200,12 +200,13 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
     unsigned int rank[ZSKIPLIST_MAXLEVEL];
     int i, level;
 
+    // 判断score一定是一个有效值
     redisAssert(!isnan(score));
 
     // 在各个层查找节点的插入位置
     // T_wrost = O(N^2), T_avg = O(N log N)
     x = zsl->header;
-    for (i = zsl->level-1; i >= 0; i--) {
+    for (i = zsl->level-1; i >= 0; i--) {  // 从最高层开始找起
 
         /* store rank that is crossed to reach the insert position */
         // 如果 i 不是 zsl->level-1 层
@@ -222,10 +223,10 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
                 // 比对分值
                 (x->level[i].forward->score == score &&
                 // 比对成员， T = O(N)
-                compareStringObjects(x->level[i].forward->obj,obj) < 0))) {
+                compareStringObjects(x->level[i].forward->obj,obj) < 0))) {  // 分值相同
 
             // 记录沿途跨越了多少个节点
-            rank[i] += x->level[i].span;
+            rank[i] += x->level[i].span;  // 计算出rank[i]
 
             // 移动至下一指针
             x = x->level[i].forward;
@@ -233,6 +234,7 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
         // 记录将要和新节点相连接的节点
         update[i] = x;
     }
+    // 计算出新节点在每一层的排名和相连接的节点
 
     /* we assume the key is not already inside, since we allow duplicated
      * scores, and the re-insertion of score and redis object should never
@@ -250,6 +252,9 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
     // 如果新节点的层数比表中其他节点的层数都要大
     // 那么初始化表头节点中未使用的层，并将它们记录到 update 数组中
     // 将来也指向新节点
+
+    // 跨度实际上是用来计算排位的(rank)：在查找某个节点的过程中，
+    // 将沿途访问过的所有层的跨度累计起来，得到的结果就是目标节点在跳跃表中的排位。
     if (level > zsl->level) {
 
         // 初始化未使用层
@@ -257,7 +262,7 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
         for (i = zsl->level; i < level; i++) {
             rank[i] = 0;
             update[i] = zsl->header;
-            update[i]->level[i].span = zsl->length;
+            update[i]->level[i].span = zsl->length;  // 因为确实没有指向任何的节点了
         }
 
         // 更新表中节点最大层数
@@ -279,6 +284,9 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
 
         /* update span covered by update[i] as x is inserted here */
         // 计算新节点跨越的节点数量
+        // 在每一层的前置节点的基础上加上差值
+
+        // !!!这个我觉得比较难理解的，需要反复看几遍
         x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
 
         // 更新新节点插入之后，沿途节点的 span 值
@@ -432,11 +440,13 @@ int zslIsInRange(zskiplist *zsl, zrangespec *range) {
 
     // 检查最大分值
     x = zsl->tail;
+    // x->score是否大于range->min
     if (x == NULL || !zslValueGteMin(x->score,range))
         return 0;
 
     // 检查最小分值
     x = zsl->header->level[0].forward;
+    // x->score是否小于range->max
     if (x == NULL || !zslValueLteMax(x->score,range))
         return 0;
 
@@ -644,7 +654,7 @@ unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned 
 
     // 移动到排位的起始的第一个节点
     traversed++;
-    x = x->level[0].forward;
+    x = x->level[0].forward;  // 回到第一层,节点最全
     // 删除所有在给定排位范围内的节点
     // T = O(N)
     while (x && traversed <= end) {

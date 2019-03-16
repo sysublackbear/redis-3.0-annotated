@@ -763,13 +763,21 @@ unsigned char *ziplistNew(void) {
 
     // ZIPLIST_HEADER_SIZE 是 ziplist 表头的大小
     // 1 字节是表末端 ZIP_END 的大小
+
+    /*
+        ziplist 末端标识符，以及 5 字节长长度标识符
+        #define ZIP_END 255
+        #define ZIP_BIGLEN 254
+    */
     unsigned int bytes = ZIPLIST_HEADER_SIZE+1;
 
     // 为表头和表末端分配空间
     unsigned char *zl = zmalloc(bytes);
 
     // 初始化表属性
+    // 定位到压缩链表的头部,zlbytes为大小
     ZIPLIST_BYTES(zl) = intrev32ifbe(bytes);
+    // zltail代表压缩列表尾节点距离压缩
     ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(ZIPLIST_HEADER_SIZE);
     ZIPLIST_LENGTH(zl) = 0;
 
@@ -1359,7 +1367,7 @@ unsigned char *ziplistPrev(unsigned char *zl, unsigned char *p) {
     if (p[0] == ZIP_END) {
         p = ZIPLIST_ENTRY_TAIL(zl);
         // 尾端节点也指向列表末端，那么列表为空
-        return (p[0] == ZIP_END) ? NULL : p;
+        return (p[0] == ZIP_END) ? NULL : p;  // 列表末端标记的作用:防止越界
     
     // 如果 p 指向列表头，那么说明迭代已经完成
     } else if (p == ZIPLIST_ENTRY_HEAD(zl)) {
@@ -1650,7 +1658,7 @@ size_t ziplistBlobLen(unsigned char *zl) {
 void ziplistRepr(unsigned char *zl) {
     unsigned char *p;
     int index = 0;
-    zlentry entry;
+    zlentry entry; 
 
     printf(
         "{total bytes %d} "

@@ -190,14 +190,18 @@ void bioCreateBackgroundJob(int type, void *arg1, void *arg2, void *arg3) {
     job->arg2 = arg2;
     job->arg3 = arg3;
 
+    // 总共就两组互斥量和条件变量
     pthread_mutex_lock(&bio_mutex[type]);
 
     // 将新工作推入队列
     listAddNodeTail(bio_jobs[type],job);
+    // 记录每种类型 job 队列里有多少 job 等待执行
     bio_pending[type]++;
 
+    // 发送一个信号给另外一个正在处于阻塞等待状态的线程,使其脱离阻塞状态,继续执行. 
     pthread_cond_signal(&bio_condvar[type]);
 
+    // 释放互斥量
     pthread_mutex_unlock(&bio_mutex[type]);
 }
 
@@ -228,6 +232,7 @@ void *bioProcessBackgroundJobs(void *arg) {
 
         /* The loop always starts with the lock hold. */
         if (listLength(bio_jobs[type]) == 0) {
+            // 队列为空，陷入阻塞等待
             pthread_cond_wait(&bio_condvar[type],&bio_mutex[type]);
             continue;
         }

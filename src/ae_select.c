@@ -32,7 +32,7 @@
 #include <string.h>
 
 typedef struct aeApiState {
-    fd_set rfds, wfds;
+    fd_set rfds, wfds;  // 读事件集合,写事件集合
     /* We need to have a copy of the fd sets as it's not safe to reuse
      * FD sets after select(). */
     fd_set _rfds, _wfds;
@@ -61,7 +61,7 @@ static void aeApiFree(aeEventLoop *eventLoop) {
 static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     aeApiState *state = eventLoop->apidata;
 
-    if (mask & AE_READABLE) FD_SET(fd,&state->rfds);
+    if (mask & AE_READABLE) FD_SET(fd,&state->rfds);   // linux的API方法
     if (mask & AE_WRITABLE) FD_SET(fd,&state->wfds);
     return 0;
 }
@@ -80,6 +80,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     memcpy(&state->_rfds,&state->rfds,sizeof(fd_set));
     memcpy(&state->_wfds,&state->wfds,sizeof(fd_set));
 
+    // 等待无限长的时间。等待可以被一个信号中断。
     retval = select(eventLoop->maxfd+1,
                 &state->_rfds,&state->_wfds,NULL,tvp);
     if (retval > 0) {

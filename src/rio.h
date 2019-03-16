@@ -101,8 +101,12 @@ typedef struct _rio rio;
  */
 static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
     while (len) {
+        // 尽可能分次写入
         size_t bytes_to_write = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
+        // 判断是否有校验和计算的函数,有的话，则计算与校验
+        // 每次有写入/读取新数据时都要计算一次
         if (r->update_cksum) r->update_cksum(r,buf,bytes_to_write);
+        // 调用write方法
         if (r->write(r,buf,bytes_to_write) == 0)
             return 0;
         buf = (char*)buf + bytes_to_write;
@@ -119,6 +123,7 @@ static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
  */
 static inline size_t rioRead(rio *r, void *buf, size_t len) {
     while (len) {
+        // 分次读取
         size_t bytes_to_read = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
         if (r->read(r,buf,bytes_to_read) == 0)
             return 0;

@@ -75,7 +75,7 @@ typedef struct aofrwblock {
     unsigned long used, free;
 
     // 缓存块
-    char buf[AOF_RW_BUF_BLOCK_SIZE];
+    char buf[AOF_RW_BUF_BLOCK_SIZE];   // 一个block的大小为10MB
 
 } aofrwblock;
 
@@ -95,6 +95,7 @@ void aofRewriteBufferReset(void) {
 
     // 初始化新的缓存（链表）
     server.aof_rewrite_buf_blocks = listCreate();
+    // 将server.aof_rewrite_buf_blocks的free函数设置为zfree
     listSetFreeMethod(server.aof_rewrite_buf_blocks,zfree);
 }
 
@@ -150,6 +151,7 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
         // 如果 block != NULL ，那么这里是创建另一个缓存块买容纳 block 装不下的内容
         // 如果 block == NULL ，那么这里是创建缓存链表的第一个缓存块
         if (len) { /* First block to allocate, or need another block. */
+            // 还有剩余长度
             int numblocks;
 
             // 分配缓存块
@@ -222,7 +224,12 @@ ssize_t aofRewriteBufferWrite(int fd) {
  *
  * 在另一个线程中，对给定的描述符 fd （指向 AOF 文件）执行一个后台 fsync() 操作。
  */
+
+// 注意互斥量和条件变量的四个方法
+// pthread_mutex_lock, pthread_mutex_unlock, pthread_cond_signal, pthread_cond_wait
 void aof_background_fsync(int fd) {
+    // 只有一个参数fd
+    // 建立fsync任务，入队
     bioCreateBackgroundJob(REDIS_BIO_AOF_FSYNC,(void*)(long)fd,NULL,NULL);
 }
 
@@ -241,6 +248,7 @@ void stopAppendOnly(void) {
     flushAppendOnlyFile(1);
 
     // 冲洗 AOF 文件
+    // 这里其实在flushAppendOnlyFile里面有做的，只不过里面由参数控制，这里强制做一次
     aof_fsync(server.aof_fd);
 
     // 关闭 AOF 文件
@@ -264,6 +272,8 @@ void stopAppendOnly(void) {
 
         // 杀死子进程
         if (kill(server.aof_child_pid,SIGUSR1) != -1)
+            // wait3和wait4函数除了可以获取子进程状态转变信息外，还可以获得子进程的资源使用信息。
+            // 等待子进程状态退出
             wait3(&statloc,0,NULL);
 
         /* reset the buffer accumulating changes while the child saves 
@@ -354,6 +364,11 @@ int startAppendOnly(void) {
  * 不过，如果 force 为 1 的话，那么不管后台是否正在 fsync ，
  * 程序都直接进行写入。
  */
+
+// 1.write的前置校验（判断是否需要write，对于FSYNC_EVERYSEC，2s内只需要直接返回，因为就算write也会阻塞在fsync上）
+// 2.write操作，确保写入的字节与aio_buf一致，不一致，对于always模式直接报错；对于everysecond模式，则能写多少算多少
+// 3.write成功的话，回收重用或者释放缓冲区；
+// 4.根据选项和模式判断是否需要进行fsync操作
 #define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
 void flushAppendOnlyFile(int force) {
     ssize_t nwritten;
@@ -365,6 +380,7 @@ void flushAppendOnlyFile(int force) {
     // 策略为每秒 FSYNC 
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
         // 是否有 SYNC 正在后台进行？
+        // bioPendingJobsOfType 返回等待中的 type 类型的工作的数量
         sync_in_progress = bioPendingJobsOfType(REDIS_BIO_AOF_FSYNC) != 0;
 
     // 每秒 fsync ，并且强制写入为假
@@ -379,6 +395,7 @@ void flushAppendOnlyFile(int force) {
          *
          * 如果后台仍在执行 FSYNC ，那么我们可以延迟写操作一两秒
          * （如果强制执行 write 的话，服务器主线程将阻塞在 write 上面）
+         * write会被fsync阻塞
          */
         if (sync_in_progress) {
 
@@ -391,6 +408,8 @@ void flushAppendOnlyFile(int force) {
                  * 前面没有推迟过 write 操作，这里将推迟写操作的时间记录下来
                  * 然后就返回，不执行 write 或者 fsync
                  */
+
+                // 本次不写，推迟写，直接返回
                 server.aof_flush_postponed_start = server.unixtime;
                 return;
 
@@ -440,6 +459,7 @@ void flushAppendOnlyFile(int force) {
      */
     nwritten = write(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
     if (nwritten != (signed)sdslen(server.aof_buf)) {
+        // 写入不完整：nwritten不等于server.aof_buf的长度
 
         static time_t last_write_error_log = 0;
         int can_log = 0;
@@ -503,6 +523,7 @@ void flushAppendOnlyFile(int force) {
              * was no way to undo it with ftruncate(2). */
             if (nwritten > 0) {
                 server.aof_current_size += nwritten;
+                // 部分写入，不进行报错，减少aof_buf的长度，能写入多少算多少
                 sdsrange(server.aof_buf,nwritten,-1);
             }
             return; /* We'll try again on the next call... */
@@ -527,6 +548,8 @@ void flushAppendOnlyFile(int force) {
      * 如果 AOF 缓存的大小足够小的话，那么重用这个缓存，
      * 否则的话，释放 AOF 缓存。
      */
+
+    // !!!注意：只有写入成功才走这段逻辑
     if ((sdslen(server.aof_buf)+sdsavail(server.aof_buf)) < 4000) {
         // 清空缓存中的内容，等待重用
         sdsclear(server.aof_buf);
@@ -549,10 +572,20 @@ void flushAppendOnlyFile(int force) {
 
     /* Perform the fsync if needed. */
 
+
+    // write完正常来说要进行fsync操作，确保改动已经同步到磁盘上
+
     // 总是执行 fsnyc
     if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
         /* aof_fsync is defined as fdatasync() for Linux in order to avoid
          * flushing metadata. */
+        /*
+        #ifdef __linux__
+        #define aof_fsync fdatasync
+        #else
+        #define aof_fsync fsync
+        #endif
+         */
         aof_fsync(server.aof_fd); /* Let's try to get this data on the disk */
 
         // 更新最后一次执行 fsnyc 的时间
@@ -574,6 +607,7 @@ void flushAppendOnlyFile(int force) {
 
 /*
  * 根据传入的命令和命令参数，将它们还原成协议格式。
+ * 比如：SET KEY VALUE 转成：$3\r\nSET\r\n$3\r\nKEY\r\n$5\r\nVALUE\r\n
  */
 sds catAppendOnlyGenericCommand(sds dst, int argc, robj **argv) {
     char buf[32];
@@ -666,6 +700,7 @@ sds catAppendOnlyExpireAtCommand(sds buf, struct redisCommand *cmd, robj *key, r
     argv[2] = createStringObjectFromLongLong(when);
 
     // 追加到 AOF 缓存中
+    // 先转成PEXPIREAT的通用命令，再通过catAppendOnlyGenericCommand转成通用的AOF协议格式
     buf = catAppendOnlyGenericCommand(buf, 3, argv);
 
     decrRefCount(argv[0]);
@@ -677,6 +712,7 @@ sds catAppendOnlyExpireAtCommand(sds buf, struct redisCommand *cmd, robj *key, r
 /*
  * 将命令追加到 AOF 文件中，
  * 如果 AOF 重写正在进行，那么也将命令追加到 AOF 重写缓存中。
+ * server.aof_buf(AOF缓冲区) + server.aof_rewrite_buf_blocks(AOF重写缓存)
  */
 void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
     sds buf = sdsempty();
@@ -687,6 +723,7 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
      *
      * 使用 SELECT 命令，显式设置数据库，确保之后的命令被设置到正确的数据库
      */
+    // 确保使用上正确的数据库
     if (dictid != server.aof_selected_db) {
         char seldb[64];
 
@@ -707,6 +744,7 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
         buf = catAppendOnlyExpireAtCommand(buf,cmd,argv[1],argv[2]);
 
     // SETEX 和 PSETEX 命令
+    // 一条命令拆成两条命令
     } else if (cmd->proc == setexCommand || cmd->proc == psetexCommand) {
         /* Translate SETEX/PSETEX to SET and PEXPIREAT 
          *
@@ -740,7 +778,7 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
      * 并向客户端返回一个回复。
      */
     if (server.aof_state == REDIS_AOF_ON)
-        server.aof_buf = sdscatlen(server.aof_buf,buf,sdslen(buf));
+        server.aof_buf = sdscatlen(server.aof_buf,buf,sdslen(buf));  // 将buf追加到aof_buf中
 
     /* If a background append only file rewriting is in progress we want to
      * accumulate the differences between the child DB and the current one
@@ -786,6 +824,7 @@ struct redisClient *createFakeClient(void) {
      * so that Redis will not try to send replies to this client. 
      *
      * 将客户端设置为正在等待同步的附属节点，这样客户端就不会发送回复了。
+     * TODO:为什么
      */
     c->replstate = REDIS_REPL_WAIT_BGSAVE_START;
     c->reply = listCreate();
@@ -1047,6 +1086,7 @@ int rewriteListObject(rio *r, robj *key, robj *o) {
         // 之后重复第一步，直到 ZIPLIST 为空
         while(ziplistGet(p,&vstr,&vlen,&vlong)) {
             if (count == 0) {
+                // count等于0，代表这个是新的命令开始，得先把RPUSH和key写到命令的开头
                 int cmd_items = (items > REDIS_AOF_REWRITE_ITEMS_PER_CMD) ?
                     REDIS_AOF_REWRITE_ITEMS_PER_CMD : items;
 
@@ -1191,9 +1231,9 @@ int rewriteSortedSetObject(rio *r, robj *key, robj *o) {
                 if (rioWriteBulkString(r,"ZADD",4) == 0) return 0;
                 if (rioWriteBulkObject(r,key) == 0) return 0;
             }
-            if (rioWriteBulkDouble(r,score) == 0) return 0;
+            if (rioWriteBulkDouble(r,score) == 0) return 0;   // score
             if (vstr != NULL) {
-                if (rioWriteBulkString(r,(char*)vstr,vlen) == 0) return 0;
+                if (rioWriteBulkString(r,(char*)vstr,vlen) == 0) return 0;  // member
             } else {
                 if (rioWriteBulkLongLong(r,vll) == 0) return 0;
             }
@@ -1355,6 +1395,9 @@ int rewriteAppendOnlyFile(char *filename) {
     // 就执行一次 FSYNC 
     // 防止缓存中积累太多命令内容，造成 I/O 阻塞时间过长
     if (server.aof_rewrite_incremental_fsync)
+        // 这个函数是为了防止一次写入过多内容而设置的。
+        // 通过显示地、间隔性地调用 fsync ，
+        // 可以将写入的 I/O 压力分担到多次 fsync 调用中。
         rioSetAutoSync(&aof,REDIS_AOF_AUTOSYNC_BYTES);
 
     // 遍历所有数据库
@@ -1369,6 +1412,7 @@ int rewriteAppendOnlyFile(char *filename) {
         if (dictSize(d) == 0) continue;
 
         // 创建键空间迭代器
+        // 有可能共享，而不是独占
         di = dictGetSafeIterator(d);
         if (!di) {
             fclose(fp);
@@ -1379,6 +1423,8 @@ int rewriteAppendOnlyFile(char *filename) {
          *
          * 首先写入 SELECT 命令，确保之后的数据会被插入到正确的数据库上
          */
+
+        // 将 SELECT dbnum 写入到aof文件里面
         if (rioWrite(&aof,selectcmd,sizeof(selectcmd)-1) == 0) goto werr;
         if (rioWriteBulkLongLong(&aof,j) == 0) goto werr;
 
@@ -1396,6 +1442,14 @@ int rewriteAppendOnlyFile(char *filename) {
 
             // 取出值
             o = dictGetVal(de);
+            /*
+             #define initStaticStringObject(_var,_ptr) do { \
+             _var.refcount = 1; \
+             _var.type = REDIS_STRING; \
+             _var.encoding = REDIS_ENCODING_RAW; \
+             _var.ptr = _ptr; \
+             } while(0);
+            */
             initStaticStringObject(key,keystr);
 
             // 取出过期时间
@@ -1416,15 +1470,25 @@ int rewriteAppendOnlyFile(char *filename) {
                 char cmd[]="*3\r\n$3\r\nSET\r\n";
                 if (rioWrite(&aof,cmd,sizeof(cmd)-1) == 0) goto werr;
                 /* Key and value */
+                // 写字符串
+                // 写字符串的命令：SET KEY VALUE
                 if (rioWriteBulkObject(&aof,&key) == 0) goto werr;
                 if (rioWriteBulkObject(&aof,o) == 0) goto werr;
             } else if (o->type == REDIS_LIST) {
+                // 写列表对象
+                // 写列表的命令：RPUSH key item1 item2 ... itemN
                 if (rewriteListObject(&aof,&key,o) == 0) goto werr;
             } else if (o->type == REDIS_SET) {
+                // 写集合对象
+                // SADD key item1 item2 ... itemN
                 if (rewriteSetObject(&aof,&key,o) == 0) goto werr;
             } else if (o->type == REDIS_ZSET) {
+                // 写有序集合对象
+                // ZADD key score1 member1 score2 member2 ... scoreN memberN
                 if (rewriteSortedSetObject(&aof,&key,o) == 0) goto werr;
             } else if (o->type == REDIS_HASH) {
+                // 写哈希表对象
+                // HMSET key field1 value1 field2 value2 ... fieldN valueN
                 if (rewriteHashObject(&aof,&key,o) == 0) goto werr;
             } else {
                 redisPanic("Unknown object type");
@@ -1438,6 +1502,7 @@ int rewriteAppendOnlyFile(char *filename) {
                 char cmd[]="*3\r\n$9\r\nPEXPIREAT\r\n";
 
                 // 写入 PEXPIREAT expiretime 命令
+                // PEXPIREAT KEY_NAME TIME_IN_MILLISECONDS_IN_UNIX_TIMESTAMP
                 if (rioWrite(&aof,cmd,sizeof(cmd)-1) == 0) goto werr;
                 if (rioWriteBulkObject(&aof,&key) == 0) goto werr;
                 if (rioWriteBulkLongLong(&aof,expiretime) == 0) goto werr;
@@ -1450,6 +1515,7 @@ int rewriteAppendOnlyFile(char *filename) {
 
     /* Make sure data will not remain on the OS's output buffers */
     // 冲洗并关闭新 AOF 文件
+    // 强制刷入磁盘
     if (fflush(fp) == EOF) goto werr;
     if (aof_fsync(fileno(fp)) == -1) goto werr;
     if (fclose(fp) == EOF) goto werr;
@@ -1521,6 +1587,7 @@ int rewriteAppendOnlyFileBackground(void) {
         char tmpfile[256];
 
         /* Child */
+        // 子进程
 
         // 关闭网络连接 fd
         closeListeningSockets(0);
@@ -1576,7 +1643,24 @@ int rewriteAppendOnlyFileBackground(void) {
          * 强制让 feedAppendOnlyFile() 下次执行时引发一个 SELECT 命令，
          * 从而确保之后新添加的命令会设置到正确的数据库中
          */
+
+        /*
+        feedAppendOnlyFile函数会有这段逻辑
+        if (dictid != server.aof_selected_db) {
+            char seldb[64];
+
+            snprintf(seldb,sizeof(seldb),"%d",dictid);
+            buf = sdscatprintf(buf,"*2\r\n$6\r\nSELECT\r\n$%lu\r\n%s\r\n",
+                (unsigned long)strlen(seldb),seldb);
+            server.aof_selected_db = dictid;
+        }
+         */
         server.aof_selected_db = -1;
+        // 清空脚本缓存
+        // 在以下情况下执行：
+        // 1.有新从服务器连入，并且执行了一次 full SYNC ， PSYNC 无须清空缓存
+        // 2.每次执行 AOF 重写时
+        // 3.在没有任何从服务器，AOF 关闭的时候，为节约内存而执行清空。
         replicationScriptCacheFlush();
         return REDIS_OK;
     }
@@ -1592,7 +1676,7 @@ void bgrewriteaofCommand(redisClient *c) {
     // 如果正在执行 BGSAVE ，那么预定 BGREWRITEAOF
     // 等 BGSAVE 完成之后， BGREWRITEAOF 就会开始执行
     } else if (server.rdb_child_pid != -1) {
-        server.aof_rewrite_scheduled = 1;
+        server.aof_rewrite_scheduled = 1;   // Rewrite once BGSAVE terminates.
         addReplyStatus(c,"Background append only file rewriting scheduled");
 
     // 执行 BGREWRITEAOF
@@ -1681,6 +1765,8 @@ void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
          *
          * 剩下的工作就是将临时文件改名为 AOF 程序指定的文件名，
          * 并将新文件的 fd 设为 AOF 程序的写目标。
+         * 
+         * 防止因为文件rename而阻塞在unlink上面
          *
          * 不过这里有一个问题 ——
          * 我们不想 close(2) 或者 rename(2) 在删除旧文件时阻塞。

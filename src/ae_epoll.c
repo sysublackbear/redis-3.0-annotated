@@ -31,6 +31,8 @@
 
 #include <sys/epoll.h>
 
+// 跟epoll相关的只有三个API：
+// epoll_create, epoll_ctl, epoll_wait
 /*
  * 事件状态
  */
@@ -108,7 +110,7 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
      *
      * 如果已经关联了某个/某些事件，那么这是一个 MOD 操作。
      */
-    int op = eventLoop->events[fd].mask == AE_NONE ?
+    int op = eventLoop->events[fd].mask == AE_NONE ?   // 未设置
             EPOLL_CTL_ADD : EPOLL_CTL_MOD;
 
     // 注册事件到 epoll
@@ -155,6 +157,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     int retval, numevents = 0;
 
     // 等待时间
+    // -1代表永久阻塞，知道有事件进行触发
     retval = epoll_wait(state->epfd,state->events,eventLoop->setsize,
             tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
 
@@ -174,7 +177,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             if (e->events & EPOLLERR) mask |= AE_WRITABLE;
             if (e->events & EPOLLHUP) mask |= AE_WRITABLE;
 
-            eventLoop->fired[j].fd = e->data.fd;
+            eventLoop->fired[j].fd = e->data.fd;   // fired代表已就绪的文件事件
             eventLoop->fired[j].mask = mask;
         }
     }

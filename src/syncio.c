@@ -68,6 +68,8 @@ ssize_t syncWrite(int fd, char *ptr, ssize_t size, long long timeout) {
         if (size == 0) return ret;
 
         /* Wait */
+        // 死循环等io就绪，可读
+        // 用死循环保住异步来实现同步
         aeWait(fd,AE_WRITABLE,wait);
         elapsed = mstime() - start;
         if (elapsed >= timeout) {

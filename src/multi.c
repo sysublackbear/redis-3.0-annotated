@@ -101,10 +101,10 @@ void discardTransaction(redisClient *c) {
     freeClientMultiState(c);
     initClientMultiState(c);
 
-    // 屏蔽事务状态
+    // 屏蔽事务状态（删除所有与事务有关的状态）
     c->flags &= ~(REDIS_MULTI|REDIS_DIRTY_CAS|REDIS_DIRTY_EXEC);;
 
-    // 取消对所有键的监视
+    // 取消对所有键的监视（取消该客户端对所有key的监视）
     unwatchAllKeys(c);
 }
 
@@ -124,6 +124,7 @@ void flagTransaction(redisClient *c) {
 void multiCommand(redisClient *c) {
 
     // 不能在事务中嵌套事务
+    // 之前已经调用过multi开启过事务了，没必要重复开启
     if (c->flags & REDIS_MULTI) {
         addReplyError(c,"MULTI calls can not be nested");
         return;
@@ -135,6 +136,7 @@ void multiCommand(redisClient *c) {
     addReply(c,shared.ok);
 }
 
+// 取消事务命令
 void discardCommand(redisClient *c) {
 
     // 不能在客户端未进行事务状态之前使用
@@ -194,6 +196,7 @@ void execCommand(redisClient *c) {
      * 而第二种情况则返回一个 EXECABORT 错误
      */
     if (c->flags & (REDIS_DIRTY_CAS|REDIS_DIRTY_EXEC)) {
+        // key数据已经被写脏
 
         addReply(c, c->flags & REDIS_DIRTY_EXEC ? shared.execaborterr :
                                                   shared.nullmultibulk);
@@ -206,6 +209,8 @@ void execCommand(redisClient *c) {
 
     /* Exec all the queued commands */
     // 已经可以保证安全性了，取消客户端对所有键的监视
+
+    // 先取消？再执行命令？
     unwatchAllKeys(c); /* Unwatch ASAP otherwise we'll waste CPU cycles */
 
     // 因为事务中的命令在执行时可能会修改命令和命令的参数
@@ -237,14 +242,14 @@ void execCommand(redisClient *c) {
          */
         if (!must_propagate && !(c->cmd->flags & REDIS_CMD_READONLY)) {
 
-            // 传播 MULTI 命令
+            // 传播 MULTI 命令（只传播一次MULTI命令）
             execCommandPropagateMulti(c);
 
             // 计数器，只发送一次
             must_propagate = 1;
         }
 
-        // 执行命令
+        // 执行命令（事务里面的命令已经在call函数里面被传播出去）
         call(c,REDIS_CALL_FULL);
 
         /* Commands may alter argc/argv, restore mstate. */
@@ -268,7 +273,7 @@ void execCommand(redisClient *c) {
     /* Make sure the EXEC command will be propagated as well if MULTI
      * was already propagated. */
     // 将服务器设为脏，确保 EXEC 命令也会被传播
-    if (must_propagate) server.dirty++;
+    if (must_propagate) server.dirty++;   // TODO:这里看不出来在哪里传播了EXEC命令
 
 handle_monitor:
     /* Send EXEC to clients waiting data from MONITOR. We do it here
@@ -419,6 +424,8 @@ void unwatchAllKeys(redisClient *c) {
          * from the list */
         // 从数据库的 watched_keys 字典的 key 键中
         // 删除链表里包含的客户端节点
+
+        // 毕竟在本地client记录了这个watch_key，在svr中的redisDb也记录了哪些client正在watch哪些key
         wk = listNodeValue(ln);
         // 取出客户端链表
         clients = dictFetchValue(wk->db->watched_keys, wk->key);
@@ -465,7 +472,7 @@ void touchWatchedKey(redisDb *db, robj *key) {
     while((ln = listNext(&li))) {
         redisClient *c = listNodeValue(ln);
 
-        c->flags |= REDIS_DIRTY_CAS;
+        c->flags |= REDIS_DIRTY_CAS;  // 更新CAS标识，代表数据被写脏
     }
 }
 
@@ -499,7 +506,7 @@ void touchWatchedKeysOnFlush(int dbid) {
 
         // 遍历客户端监视的键
         listRewind(c->watched_keys,&li2);
-        while((ln = listNext(&li2))) {
+        while((ln = listNext(&·))) {
 
             // 取出监视的键和键的数据库
             watchedKey *wk = listNodeValue(ln);
@@ -509,6 +516,7 @@ void touchWatchedKeysOnFlush(int dbid) {
              * removed. */
             // 如果数据库号码相同，或者执行的命令为 FLUSHALL
             // 那么将客户端设置为 REDIS_DIRTY_CAS
+            // dbid为-1，证明所有的db都会被删除，根本不需要作比较
             if (dbid == -1 || wk->db->id == dbid) {
                 if (dictFind(wk->db->dict, wk->key->ptr) != NULL)
                     c->flags |= REDIS_DIRTY_CAS;
@@ -517,6 +525,7 @@ void touchWatchedKeysOnFlush(int dbid) {
     }
 }
 
+// watch多个key
 void watchCommand(redisClient *c) {
     int j;
 
@@ -533,6 +542,7 @@ void watchCommand(redisClient *c) {
     addReply(c,shared.ok);
 }
 
+// 取消客户端watch所有key
 void unwatchCommand(redisClient *c) {
 
     // 取消客户端对所有键的监视

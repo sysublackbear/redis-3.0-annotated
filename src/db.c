@@ -62,7 +62,14 @@ robj *lookupKey(redisDb *db, robj *key) {
          * Don't do it if we have a saving child, as this will trigger
          * a copy on write madness. */
         // 更新时间信息（只在不存在子进程时执行，防止破坏 copy-on-write 机制）
+        // 子进程存在的话，证明在做持久化，避免在持久化的时候lru，因为lru会批量
+        // 更改数据，又要写增量更新的日志，增量更新日志写满了的话，是需要重新做持久化的。
+        // 子进程：定期fork做持久化，然后做完退出。
+
+        // 主线程常驻 如果主线程总是cow的时候修改，内核需要额外在别的物理内存找新的页存放修改的信息
+        // 如果bgsave的时候总是让主线程修改内存  就很可能有很多额外的内存碎片产生
         if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
+            // TODO:这里需要弄明白
             val->lru = LRU_CLOCK();
 
         // 返回值
@@ -86,7 +93,7 @@ robj *lookupKeyRead(redisDb *db, robj *key) {
     robj *val;
 
     // 检查 key 释放已经过期
-    expireIfNeeded(db,key);
+    expireIfNeeded(db,key);   // 惰性删除
 
     // 从数据库中取出键的值
     val = lookupKey(db,key);
@@ -175,6 +182,7 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
     redisAssertWithInfo(NULL,key,retval == REDIS_OK);
 
     // 如果开启了集群模式，那么将键保存到槽里面
+    // TODO:这个后面需要想办法弄明白
     if (server.cluster_enabled) slotToKeyAdd(key);
  }
 
@@ -223,8 +231,11 @@ void setKey(redisDb *db, robj *key, robj *val) {
 
     // 添加或覆写数据库中的键值对
     if (lookupKeyWrite(db,key) == NULL) {
+        // 不存在,直接插入
+        // lockupKeyWrite和lookupKeyRead的区别：是否统计查询是否命中
         dbAdd(db,key,val);
     } else {
+        // 存在,覆盖写
         dbOverwrite(db,key,val);
     }
 
@@ -302,6 +313,7 @@ int dbDelete(redisDb *db, robj *key) {
     // 删除键值对
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
         // 如果开启了集群模式，那么从槽中删除给定的键
+        // TODO:集群模式需要看明白
         if (server.cluster_enabled) slotToKeyDel(key);
         return 1;
     } else {
@@ -404,6 +416,37 @@ int selectDb(redisClient *c, int id) {
  * 每当一个数据库被清空时， signalFlushDb() 都会被调用。
  *----------------------------------------------------------------------------*/
 
+/*
+ * "Touch" a key, so that if this key is being WATCHed by some client the
+ * next EXEC will fail. 
+ *
+ * “触碰”一个键，如果这个键正在被某个/某些客户端监视着，
+ * 那么这个/这些客户端在执行 EXEC 时事务将失败。
+ */
+/*
+void touchWatchedKey(redisDb *db, robj *key) {
+    list *clients;
+    listIter li;
+    listNode *ln;
+
+    // 字典为空，没有任何键被监视
+    if (dictSize(db->watched_keys) == 0) return;
+
+    // 获取所有监视这个键的客户端
+    clients = dictFetchValue(db->watched_keys, key);
+    if (!clients) return;
+
+    // Mark all the clients watching this key as REDIS_DIRTY_CAS
+    // Check if we are already watching for this key 
+    // 遍历所有客户端，打开他们的 REDIS_DIRTY_CAS 标识
+    listRewind(clients,&li);
+    while((ln = listNext(&li))) {
+        redisClient *c = listNodeValue(ln);
+
+        c->flags |= REDIS_DIRTY_CAS;  // 更新CAS标识，代表数据被写脏
+    }
+}
+*/
 void signalModifiedKey(redisDb *db, robj *key) {
     touchWatchedKey(db,key);
 }
@@ -423,6 +466,7 @@ void signalFlushedDb(int dbid) {
  */
 void flushdbCommand(redisClient *c) {
 
+    // 自从上次 SAVE 执行以来，数据库被修改的次数
     server.dirty += dictSize(c->db->dict);
 
     // 发送通知
@@ -447,7 +491,7 @@ void flushallCommand(redisClient *c) {
     signalFlushedDb(-1);
 
     // 清空所有数据库
-    server.dirty += emptyDb(NULL);
+    server.dirty += emptyDb(NULL);  // NULL是函数指针，callback参数
     addReply(c,shared.ok);
 
     // 如果正在保存新的 RDB ，那么取消保存操作
@@ -530,7 +574,7 @@ void selectCommand(redisClient *c) {
     }
 
     // 切换数据库
-    if (selectDb(c,id) == REDIS_ERR) {
+    if (selectDb(c,id) == REDIS_ERR) {  // c->db = &server.db[id];
         addReplyError(c,"invalid DB index");
     } else {
         addReply(c,shared.ok);
@@ -590,6 +634,7 @@ void keysCommand(redisClient *c) {
 
 /* This callback is used by scanGenericCommand in order to collect elements
  * returned by the dictionary iterator into a list. */
+// 将de的key和value(如果有)拼在一个链表里面
 void scanCallback(void *privdata, const dictEntry *de) {
     void **pd = (void**) privdata;
     list *keys = pd[0];
@@ -623,6 +668,7 @@ void scanCallback(void *privdata, const dictEntry *de) {
  * if the cursor is valid, store it as unsigned integer into *cursor and
  * returns REDIS_OK. Otherwise return REDIS_ERR and send an error to the
  * client. */
+// 解析scan命令的参数
 int parseScanCursorOrReply(redisClient *c, robj *o, unsigned long *cursor) {
     char *eptr;
 
@@ -661,6 +707,7 @@ int parseScanCursorOrReply(redisClient *c, robj *o, unsigned long *cursor) {
  *
  * 如果被迭代的是哈希对象，那么函数返回的是键值对。
  */
+// SCAN cursor [MATCH pattern] [COUNT count]
 void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
     int rv;
     int i, j;
@@ -687,10 +734,12 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
 
     /* Step 1: Parse options. */
     // 分析选项参数
+
+    // 获取num选项和match选项
     while (i < c->argc) {
         j = c->argc - i;
 
-        // COUNT <number>
+        // COUNT <number> —— 一次拉取多少个
         if (!strcasecmp(c->argv[i]->ptr, "count") && j >= 2) {
             if (getLongFromObjectOrReply(c, c->argv[i+1], &count, NULL)
                 != REDIS_OK)
@@ -768,15 +817,16 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
         privdata[0] = keys;
         privdata[1] = o;
         do {
-            cursor = dictScan(ht, cursor, scanCallback, privdata);
+            // scanCallback将每个key-value放到结果链表里面
+            cursor = dictScan(ht, cursor, scanCallback, privdata);  // cursor代表访问到当前字典的哪个下标
         } while (cursor && listLength(keys) < count);
     } else if (o->type == REDIS_SET) {
         int pos = 0;
         int64_t ll;
 
         while(intsetGet(o->ptr,pos++,&ll))
-            listAddNodeTail(keys,createStringObjectFromLongLong(ll));
-        cursor = 0;
+            listAddNodeTail(keys,createStringObjectFromLongLong(ll));  // 从intset里面全load出来
+        cursor = 0;   // 全load出来了,直接将下标设置为0
     } else if (o->type == REDIS_HASH || o->type == REDIS_ZSET) {
         unsigned char *p = ziplistIndex(o->ptr,0);
         unsigned char *vstr;
@@ -790,7 +840,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
                                  createStringObjectFromLongLong(vll));
             p = ziplistNext(o->ptr,p);
         }
-        cursor = 0;
+        cursor = 0;  // 全load出来了,直接将下标设置为0
     } else {
         redisPanic("Not handled encoding in SCAN.");
     }
@@ -823,7 +873,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
         /* Remove the element and its associted value if needed. */
         if (filter) {
             decrRefCount(kobj);
-            listDelNode(keys, node);
+            listDelNode(keys, node);   // 从key中去掉nate节点
         }
 
         /* If this is a hash or a sorted set, we have a flat list of
@@ -835,7 +885,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
             if (filter) {
                 kobj = listNodeValue(node);
                 decrRefCount(kobj);
-                listDelNode(keys, node);
+                listDelNode(keys, node);  // 把value也删除
             }
         }
         node = nextnode;
@@ -848,6 +898,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
     addReplyBulkCBuffer(c, buf, rv);
 
     addReplyMultiBulkLen(c, listLength(keys));
+    // 将key中的每个节点通知client,然后再释放
     while ((node = listFirst(keys)) != NULL) {
         robj *kobj = listNodeValue(node);
         addReplyBulk(c, kobj);
@@ -911,7 +962,7 @@ void shutdownCommand(redisClient *c) {
 
         // 停机时进行保存
         } else if (!strcasecmp(c->argv[1]->ptr,"save")) {
-            flags |= REDIS_SHUTDOWN_SAVE;
+            flags |= REDIS_SHUTDOWN_SAVE;   // 猜想:client端通过命令改变svr端，然后改变svr端的flags,svr端的进程去检测flags的值
 
         } else {
             addReply(c,shared.syntaxerr);
@@ -925,6 +976,7 @@ void shutdownCommand(redisClient *c) {
      * with half-read data).
      *
      * Also when in Sentinel mode clear the SAVE flag and force NOSAVE. */
+    // 处于哨兵模式,这个时候强制去掉停机save标记
     if (server.loading || server.sentinel_mode)
         flags = (flags & ~REDIS_SHUTDOWN_SAVE) | REDIS_SHUTDOWN_NOSAVE;
 
@@ -959,6 +1011,7 @@ void renameGenericCommand(redisClient *c, int nx) {
     if (lookupKeyWrite(c->db,c->argv[2]) != NULL) {
 
         // 如果目标键存在，并且执行的是 RENAMENX ，那么直接返回
+        // RENAMENX：当且仅当 newkey 不存在时，将 key 改名为 newkey。当 key 不存在时，返回一个错误。
         if (nx) {
             decrRefCount(o);
             addReply(c,shared.czero);
@@ -972,12 +1025,14 @@ void renameGenericCommand(redisClient *c, int nx) {
     }
 
     // 将来源键的值对象和目标键进行关联
-    dbAdd(c->db,c->argv[2],o);
+    // 插入新对象
+    dbAdd(c->db,c->argv[2],o);   // 将新的键的key与老的键信息进行关联
 
     // 如果有过期时间，那么为目标键设置过期时间
     if (expire != -1) setExpire(c->db,c->argv[2],expire);
 
     // 删除来源键
+    // 删除旧对象
     dbDelete(c->db,c->argv[1]);
 
     signalModifiedKey(c->db,c->argv[1]);
@@ -1001,6 +1056,7 @@ void renamenxCommand(redisClient *c) {
     renameGenericCommand(c,1);
 }
 
+// Redis MOVE命令是用来从当前选择的数据库键移动到指定的目标数据库。
 void moveCommand(redisClient *c) {
     robj *o;
     redisDb *src, *dst;
@@ -1097,6 +1153,8 @@ void setExpire(redisDb *db, robj *key, long long when) {
     redisAssertWithInfo(NULL,key,kde != NULL);
 
     // 根据键取出键的过期时间
+    // dictReplaceRaw:强制更新
+    // dictReplace:不强制更新
     de = dictReplaceRaw(db->expires,dictGetKey(kde));
 
     // 设置键的过期时间
@@ -1157,6 +1215,7 @@ void propagateExpire(redisDb *db, robj *key) {
 
     // 传播到 AOF 
     if (server.aof_state != REDIS_AOF_OFF)
+        // TODO:在看完AOF再研究这一块
         feedAppendOnlyFile(server.delCommand,db->id,argv,2);
 
     // 传播到所有附属节点
@@ -1284,6 +1343,7 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
     if (when <= mstime() && !server.loading && !server.masterhost) {
 
         // when 提供的时间已经过期，服务器为主节点，并且没在载入数据
+        // 这个时间本身就过期了
 
         robj *aux;
 
@@ -1294,6 +1354,7 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
         // 传播 DEL 命令
         aux = createStringObject("DEL",3);
 
+        // TODO:这句话有什么用
         rewriteClientCommandVector(c,2,aux,key);
         decrRefCount(aux);
 
@@ -1326,15 +1387,15 @@ void expireCommand(redisClient *c) {
 }
 
 void expireatCommand(redisClient *c) {
-    expireGenericCommand(c,0,UNIT_SECONDS);
+    expireGenericCommand(c,0,UNIT_SECONDS);   // 全局的unix时间戳
 }
 
 void pexpireCommand(redisClient *c) {
-    expireGenericCommand(c,mstime(),UNIT_MILLISECONDS);
+    expireGenericCommand(c,mstime(),UNIT_MILLISECONDS);   // 毫秒级别
 }
 
 void pexpireatCommand(redisClient *c) {
-    expireGenericCommand(c,0,UNIT_MILLISECONDS);
+    expireGenericCommand(c,0,UNIT_MILLISECONDS);  // 毫秒级别，全局的unix时间戳
 }
 
 /*
@@ -1346,6 +1407,7 @@ void pexpireatCommand(redisClient *c) {
  *
  *  - 为 0 时，返回秒
  */
+// TTL命令用于获取键到期的剩余时间(秒)。
 void ttlGenericCommand(redisClient *c, int output_ms) {
     long long expire, ttl = -1;
 
@@ -1361,6 +1423,7 @@ void ttlGenericCommand(redisClient *c, int output_ms) {
     // 取出过期时间
     expire = getExpire(c->db,c->argv[1]);
 
+    // expire == -1 代表没有设置过期时间
     if (expire != -1) {
         // 计算剩余生存时间
         ttl = expire-mstime();
@@ -1381,10 +1444,15 @@ void ttlCommand(redisClient *c) {
     ttlGenericCommand(c, 0);
 }
 
+// PTTL命令用于获取键以毫秒为单位的到期剩余时间。
 void pttlCommand(redisClient *c) {
     ttlGenericCommand(c, 1);
 }
 
+// PERSIST命令用于删除到期的键。
+// 整数值1或0
+// 1: 如果超时则删除键。
+// 0: 如果key不存在或不具备相关的超时时间。
 void persistCommand(redisClient *c) {
     dictEntry *de;
 
@@ -1447,6 +1515,7 @@ int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, in
  * is not required, otherwise it calls the command-specific function. */
 int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     if (cmd->getkeys_proc) {
+        // 从命令中判断命令的键参数。在 Redis 集群转向时使用。
         return cmd->getkeys_proc(cmd,argv,argc,numkeys);
     } else {
         return getKeysUsingCommandTable(cmd,argv,argc,numkeys);
@@ -1559,6 +1628,9 @@ int *sortGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) 
     return keys;
 }
 
+
+// TODO:关于Slot的API，需要再研究一下。
+
 /* Slot to Key API. This is used by Redis Cluster in order to obtain in
  * a fast way a key that belongs to a specified hash slot. This is useful
  * while rehashing the cluster. */
@@ -1634,6 +1706,8 @@ unsigned int delKeysInSlot(unsigned int hashslot) {
 }
 
 // 返回指定 slot 包含的键数量
+// 除了将键值对保存在数据库里面之外，节点还会用 clusterState 结构中的 slots_to_keys 跳跃表来保存
+// 槽和键之间的关系。
 unsigned int countKeysInSlot(unsigned int hashslot) {
     zskiplist *zsl = server.cluster->slots_to_keys;
     zskiplistNode *zn;

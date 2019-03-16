@@ -80,9 +80,13 @@ struct aeEventLoop;
  *
  * 事件接口
  */
+// 文件事件操作
 typedef void aeFileProc(struct aeEventLoop *eventLoop, int fd, void *clientData, int mask);
+// 时间事件操作
 typedef int aeTimeProc(struct aeEventLoop *eventLoop, long long id, void *clientData);
+// 事件终止后处理操作
 typedef void aeEventFinalizerProc(struct aeEventLoop *eventLoop, void *clientData);
+// 休眠之前执行的操作
 typedef void aeBeforeSleepProc(struct aeEventLoop *eventLoop);
 
 /* File event structure
