@@ -111,6 +111,8 @@ robj *createStringObjectFromLongLong(long long value) {
     // value 的大小符合 REDIS 共享整数的范围
     // 那么返回一个共享对象
     if (value >= 0 && value < REDIS_SHARED_INTEGERS) {
+	// shared位于redis.c中的struct sharedObjectsStruct shared;
+        // 通过复用来减少内存碎片，以及减少操作耗时的共享对象
         incrRefCount(shared.integers[value]);
         o = shared.integers[value];
 
