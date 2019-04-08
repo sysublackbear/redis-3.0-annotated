@@ -1029,7 +1029,7 @@ void activeExpireCycle(int type) {
 
             /* We don't repeat the cycle if there are less than 25% of keys
              * found expired in the current DB. */
-            // 如果已删除的过期键占当前总数据库带过期时间的键数量的 25 %
+            // 直到删除率低于25%
             // 那么不再遍历
         } while (expired > ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP/4);
         // 注意:这里并不是直接跳出循环，而是换到另一个数据库继续删除工作
